@@ -6,7 +6,7 @@ import smtplib
 from email.mime.text import MIMEText
 import os
 
-# 1. 配置金融股清單
+# 配置金融股清單
 FIN_MAP = {
     '2801.TW': '彰銀', '2809.TW': '京城銀', '2812.TW': '台中銀', '2834.TW': '臺企銀',
     '2880.TW': '華南金', '2881.TW': '富邦金', '2882.TW': '國泰金', '2883.TW': '凱基金',
@@ -14,73 +14,89 @@ FIN_MAP = {
     '2890.TW': '永豐金', '2891.TW': '中信金', '2892.TW': '第一金', '5880.TW': '合庫金'
 }
 
-# 網頁基本設定 (僅在 Streamlit 執行時有效)
 try:
     st.set_page_config(page_title="金融股殖利率監控", layout="wide")
     st.title("🏦 金融股五年平均「息+利」總殖利率監控")
 except:
-    pass # 讓 GitHub Actions 也能執行
+    pass
 
-def get_data():
+@st.cache_data(ttl=3600)
+def get_auto_split_data():
     results = []
     for code, name in FIN_MAP.items():
         try:
             ticker = yf.Ticker(code)
+            # 抓取即時股價
             price = ticker.fast_info['last_price']
-            div_history = ticker.actions['Dividends']
             
-            if len(div_history) >= 5:
-                avg_div = div_history.tail(5).mean()
-                total_yield = (avg_div / price) * 100
-                results.append({
-                    "股票代號": code.replace('.TW', ''),
-                    "中文名稱": name,
-                    "目前股價": round(price, 1),
-                    "五年平均總股利": round(avg_div, 2),
-                    "平均總殖利率(%)": round(total_yield, 2)
-                })
+            # 獲取所有除權息動作
+            actions = ticker.actions
+            if actions.empty:
+                continue
+                
+            # 分離現金與股票
+            # yfinance 中，Stock Splits 通常代表配股比例
+            # Dividends 代表現金股利
+            divs = actions[actions['Dividends'] > 0]['Dividends'].tail(5)
+            splits = actions[actions['Stock Splits'] > 0]['Stock Splits'].tail(5)
+            
+            # 計算五年平均 (如果該股不配股，則補 0)
+            avg_cash = divs.mean() if not divs.empty else 0
+            
+            # 台灣配股轉換邏輯：yfinance 的 Split 1.1 代表配 1 元股票 (10%)
+            # 我們將其轉換回台灣人習慣的「每股配幾元」
+            avg_stock_val = 0
+            if not splits.empty:
+                # 假設配股是以 10 元面額計，1.05 代表配 0.5 元股票
+                avg_stock_val = (splits.mean() - 1) * 10 
+            
+            total_div = avg_cash + avg_stock_val
+            total_yield = (total_div / price) * 100
+            
+            results.append({
+                "股票代號": code.replace('.TW', ''),
+                "中文名稱": name,
+                "目前股價": round(price, 1),
+                "五年平均股息(現金)": round(avg_cash, 2),
+                "五年平均股利(股票)": round(avg_stock_val, 2),
+                "總殖利率(%)": round(total_yield, 2)
+            })
         except:
             continue
     return pd.DataFrame(results)
 
-# 執行抓取
-df = get_data()
+df = get_auto_split_data()
 
-# --- 邏輯 A: 網頁顯示 (Streamlit) ---
+# --- 顯示介面 ---
 if 'st' in globals() and not df.empty:
     df.index = df.index + 1
-    def make_red(val):
-        return 'background-color: #FFCCCC' if val >= 6.5 else ''
-    st.dataframe(df.style.map(make_red, subset=['平均總殖利率(%)']), use_container_width=True)
+    st.write(f"數據自動解析時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # 呈現表格並標色
+    st.dataframe(
+        df.style.map(lambda x: 'background-color: #FFCCCC' if x >= 6.5 else '', subset=['總殖利率(%)']),
+        use_container_width=True
+    )
 
-# --- 邏輯 B: 自動通知 (GitHub Actions 或手動點擊) ---
-target_stocks = df[df['平均總殖利率(%)'] >= 6.5]
+# --- 自動通知邏輯 (GitHub Actions) ---
+target_stocks = df[df['總殖利率(%)'] >= 6.5]
 
 def send_email(target_df):
-    # 優先嘗試從 GitHub Secrets 讀取，若無則從 Streamlit Secrets 讀取
-    user = os.getenv("MAIL_USER") or st.secrets["email"]["user"]
-    password = os.getenv("MAIL_PASSWORD") or st.secrets["email"]["password"]
-    to = os.getenv("MAIL_TO") or st.secrets["email"]["to"]
+    user = os.getenv("MAIL_USER")
+    password = os.getenv("MAIL_PASSWORD")
+    to = os.getenv("MAIL_TO")
     
     if user and password:
-        content = f"📢 偵測到高殖利率標的：\n\n{target_df.to_string()}\n\n時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        content = f"📢 偵測到總殖利率達標標的：\n\n{target_df.to_string()}"
         msg = MIMEText(content)
-        msg['Subject'] = f'【台股通知】{len(target_df)} 檔金融股達標！'
+        msg['Subject'] = f'【理財通知】{len(target_df)} 檔金融股殖利率達標！'
         msg['From'] = user
         msg['To'] = to
-        
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(user, password)
             server.send_message(msg)
         return True
     return False
 
-# 如果是在 GitHub Actions 執行環境，且有達標標的，則直接發信
 if os.getenv("GITHUB_ACTIONS") == "true" and not target_stocks.empty:
     send_email(target_stocks)
-
-# 網頁上的手動測試按鈕
-if not target_stocks.empty and 'st' in globals():
-    if st.button("發送測試 Email 通知"):
-        if send_email(target_stocks):
-            st.success("Email 已成功發送！")
