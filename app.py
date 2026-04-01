@@ -4,8 +4,9 @@ from FinMind.data import DataLoader
 from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
+import time
 
-# 1. 初始化資料庫 (免帳號即可抓取基本資料)
+# 初始化資料庫
 dl = DataLoader()
 
 FIN_MAP = {
@@ -18,26 +19,32 @@ FIN_MAP = {
 st.set_page_config(page_title="台股金融股監控", layout="wide")
 st.title("🏦 台股金融股五年「息+利」總殖利率監控")
 
-@st.cache_data(ttl=3600) # 快取一小時，避免重複抓取被封鎖
+# 增加進度條顯示
+@st.cache_data(ttl=3600)
 def get_fin_data():
     results = []
     this_year = datetime.now().year
     
-    for code, name in FIN_MAP.items():
+    # 在網頁上顯示進度
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, (code, name) in enumerate(FIN_MAP.items()):
         try:
-            # 抓取股價 (今日)
+            status_text.text(f"正在抓取：{name} ({code})...")
+            
+            # 抓取股價
             df_price = dl.taiwan_stock_daily(stock_id=code, start_date=f"{this_year}-01-01")
+            if df_price.empty:
+                continue
             current_price = df_price['close'].iloc[-1]
             
-            # 抓取股利 (過去五年)
+            # 抓取股利
             df_div = dl.taiwan_stock_dividend(stock_id=code, start_date=f"{this_year-6}-01-01")
             
-            # 過濾並計算 (CashDividend 現金股息 + StockDividend 股票股利)
-            # 僅取最近 5 年的紀錄
+            # 計算平均 (息+利)
             recent_divs = df_div.tail(5)
-            avg_cash = recent_divs['CashDividend'].mean()
-            avg_stock = recent_divs['StockDividend'].mean()
-            avg_total = avg_cash + avg_stock
+            avg_total = recent_divs['CashDividend'].mean() + recent_divs['StockDividend'].mean()
             
             total_yield = (avg_total / current_price) * 100
             
@@ -48,15 +55,25 @@ def get_fin_data():
                 "五年平均總股利(息+利)": round(avg_total, 1),
                 "平均總殖利率(%)": round(total_yield, 1)
             })
+            # 更新進度條
+            progress_bar.progress((i + 1) / len(FIN_MAP))
+            time.sleep(0.5) # 稍微停頓，避免抓太快被封鎖
         except:
             continue
+            
+    status_text.empty()
+    progress_bar.empty()
     return pd.DataFrame(results)
 
-df = get_fin_data()
+# 顯示資料
+with st.spinner('大數據計算中，請稍候...'):
+    df = get_fin_data()
 
-# 顯示與通知邏輯 (與之前相同)
 if not df.empty:
     df.index = df.index + 1
-    st.dataframe(df.style.map(lambda x: 'background-color: #FFCCCC' if x >= 6.5 else '', subset=['平均總殖利率(%)']))
+    st.subheader(f"📊 即時監控清單 (更新日期: {datetime.now().strftime('%Y-%m-%d')})")
+    st.dataframe(df.style.map(lambda x: 'background-color: #FFCCCC' if x >= 6.5 else '', subset=['平均總殖利率(%)']), use_container_width=True)
     
-    # 這裡放 Email 通知按鈕邏輯... (同前一版)
+    # 這裡可以保留之前的 Email 按鈕邏輯...
+else:
+    st.error("目前抓不到資料，請檢查網路連線或稍後再試。")
