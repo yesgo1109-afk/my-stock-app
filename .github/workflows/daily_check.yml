@@ -1,0 +1,30 @@
+name: Daily Stock Check
+
+on:
+  schedule:
+    # 每天台灣時間下午 3 點執行 (對應 UTC 7:00)
+    - cron: '0 7 * * *'
+  workflow_dispatch: # 讓你可以手動按按鈕測試
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/status-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance pandas
+
+      - name: Run check
+        env:
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python app.py
