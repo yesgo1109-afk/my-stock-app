@@ -48,7 +48,7 @@ def highlight_yield(val):
     return color
 
 st.subheader("即時監控列表 (殖利率 > 6.5% 將以紅色標示)")
-st.dataframe(df.style.applymap(highlight_yield, subset=['平均殖利率(%)']))
+st.dataframe(df.style.map(highlight_yield, subset=['平均殖利率(%)']))
 
 # 3. Email 通知邏輯 (僅在有符合標的時執行)
 target_stocks = df[df['平均殖利率(%)'] >= 6.5]
