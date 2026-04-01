@@ -1,82 +1,62 @@
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
-import yfinance as yf
+from FinMind.data import DataLoader
 from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
 
-# 1. 金融股清單
+# 1. 初始化資料庫 (免帳號即可抓取基本資料)
+dl = DataLoader()
+
 FIN_MAP = {
-    '2881': '富邦金', '2882': '國泰金', '2884': '玉山金', '2886': '兆豐金', 
-    '2891': '中信金', '5880': '合庫金', '2892': '第一金', '2880': '華南金',
-    '2885': '元大金', '2887': '台新金', '2812': '台中銀', '2834': '臺企銀',
-    '2883': '凱基金', '2890': '永豐金', '5876': '上海商銀', '2801': '彰銀'
+    '2801': '彰銀', '2809': '京城銀', '2812': '台中銀', '2834': '臺企銀',
+    '2880': '華南金', '2881': '富邦金', '2882': '國泰金', '2883': '凱基金',
+    '2884': '玉山金', '2885': '元大金', '2886': '兆豐金', '2887': '台新金',
+    '2890': '永豐金', '2891': '中信金', '2892': '第一金', '5880': '合庫金'
 }
 
-st.set_page_config(page_title="金融股「息+利」自動監控", layout="wide")
-st.title("🏦 金融股五年平均「息+利」總殖利率監控")
+st.set_page_config(page_title="台股金融股監控", layout="wide")
+st.title("🏦 台股金融股五年「息+利」總殖利率監控")
 
-def get_yahoo_dividend(stock_code):
-    """從 Yahoo 奇摩股市抓取過去五年平均 (現金+股票)"""
-    url = f"https://tw.stock.yahoo.com/quote/{stock_code}.TW/dividend"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 抓取表格中的股利數據
-        # Yahoo 網頁結構：現金股利與股票股利通常在特定的列表標籤中
-        div_elements = soup.find_all('div', {'class': 'Lh(20px)'}) 
-        
-        # 這裡會抓取最近五年的數據 (每一年有 現金、股票、合計 三個數字)
-        # 我們直接抓「合計」那一欄，或者是兩者相加
-        # 簡單化處理：抓取前五個年度的總和平均
-        # 注意：此處需根據 Yahoo 網頁實際標籤解析，以下為示範逻辑
-        total_sum = 0
-        count = 0
-        
-        # 實際上 Yahoo 股市的股利資料在一個列表裡，我們取前 5 筆
-        # 每筆包含：年度、現金額、股票額、合計
-        rows = soup.find_all('li', {'class': 'List(n)'})[1:6] # 跳過標題取前五行
-        for row in rows:
-            cols = row.find_all('div', {'class': 'D(f)'})
-            # 這裡解析：現金 + 股票
-            cash = float(cols[1].text) if cols[1].text != '-' else 0
-            stock_div = float(cols[2].text) if cols[2].text != '-' else 0
-            total_sum += (cash + stock_div)
-            count += 1
-        
-        return total_sum / count if count > 0 else 0
-    except:
-        return 0
-
-@st.cache_data(ttl=3600)
-def get_final_report():
-    data_list = []
-    for code, name in FIN_MAP.items():
-        # 抓即時股價
-        ticker = yf.Ticker(f"{code}.TW")
-        price = ticker.fast_info['last_price']
-        
-        # 抓 Yahoo 奇摩股市的五年平均股利
-        avg_div = get_yahoo_dividend(code)
-        
-        # 計算總殖利率
-        total_yield = (avg_div / price) * 100
-        
-        data_list.append({
-            "股票代號": code,
-            "中文名稱": name,
-            "目前股價": round(price, 1),
-            "五年平均(息+利)": round(avg_div, 2),
-            "平均總殖利率(%)": round(total_yield, 1)
-        })
+@st.cache_data(ttl=3600) # 快取一小時，避免重複抓取被封鎖
+def get_fin_data():
+    results = []
+    this_year = datetime.now().year
     
-    df = pd.DataFrame(data_list)
-    df = df.sort_values(by="平均總殖利率(%)", ascending=False)
-    df.index = range(1, len(df) + 1)
-    return df
+    for code, name in FIN_MAP.items():
+        try:
+            # 抓取股價 (今日)
+            df_price = dl.taiwan_stock_daily(stock_id=code, start_date=f"{this_year}-01-01")
+            current_price = df_price['close'].iloc[-1]
+            
+            # 抓取股利 (過去五年)
+            df_div = dl.taiwan_stock_dividend(stock_id=code, start_date=f"{this_year-6}-01-01")
+            
+            # 過濾並計算 (CashDividend 現金股息 + StockDividend 股票股利)
+            # 僅取最近 5 年的紀錄
+            recent_divs = df_div.tail(5)
+            avg_cash = recent_divs['CashDividend'].mean()
+            avg_stock = recent_divs['StockDividend'].mean()
+            avg_total = avg_cash + avg_stock
+            
+            total_yield = (avg_total / current_price) * 100
+            
+            results.append({
+                "股票代號": code,
+                "中文名稱": name,
+                "目前股價": round(current_price, 1),
+                "五年平均總股利(息+利)": round(avg_total, 1),
+                "平均總殖利率(%)": round(total_yield, 1)
+            })
+        except:
+            continue
+    return pd.DataFrame(results)
 
-# 顯示與通知邏輯
-df = get_final_report()
-st.dataframe(df.style.map(lambda x: 'background-color: #FFCCCC' if x >= 6.5 else '', subset=['平均總殖利率(%)']))
+df = get_fin_data()
+
+# 顯示與通知邏輯 (與之前相同)
+if not df.empty:
+    df.index = df.index + 1
+    st.dataframe(df.style.map(lambda x: 'background-color: #FFCCCC' if x >= 6.5 else '', subset=['平均總殖利率(%)']))
+    
+    # 這裡放 Email 通知按鈕邏輯... (同前一版)
