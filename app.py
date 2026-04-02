@@ -61,8 +61,8 @@ def get_data_65():
 # 執行數據抓取
 df = get_data_65()
 
-# 設定門檻 (測試用 4.0，成功後改回 6.5)
-threshold = 4.0
+# 設定門檻 (測試用 4.0，成功後改回 5)
+threshold = 5.0
 
 # --- 1. 網頁顯示邏輯 ---
 if not df.empty:
