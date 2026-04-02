@@ -21,33 +21,26 @@ try:
 except:
     pass
 
-st.title("🏦 金融股五年平均「息+利」總殖利率監控 (6.5% 門檻)")
+st.title("🏦 金融股五年平均「息+利」總殖利率監控")
 
-# 設定快取：1 小時內重複打開網頁不需要重新抓取，直接顯示結果
+# 設定快取：1 小時
 @st.cache_data(ttl=3600)
 def get_data_65():
     results = []
-    # 建立一個文字提示區域
     status_text = st.empty()
     
     for i, (code, name) in enumerate(FIN_MAP.items()):
         try:
-            # 顯示目前抓取進度給使用者看 (反饋機制)
             status_text.text(f"⏳ 正在同步第 {i+1}/16 檔：{name} ({code})...")
-            
             ticker = yf.Ticker(code)
             price = ticker.fast_info['last_price']
             actions = ticker.actions
             
             if not actions.empty:
-                # 抓取最近 5 次現金股息
                 div_series = actions[actions['Dividends'] > 0]['Dividends']
                 avg_cash = div_series.tail(5).mean() if not div_series.empty else 0
-                
-                # 抓取最近 5 次股票股利 (還原台灣 1 元配股格式)
                 split_series = actions[actions['Stock Splits'] > 0]['Stock Splits']
                 avg_stock = (split_series.tail(5).mean() - 1) * 10 if not split_series.empty else 0
-                
                 total_yield = ((avg_cash + avg_stock) / price) * 100
                 
                 results.append({
@@ -58,56 +51,57 @@ def get_data_65():
                     "五年平均配股": round(avg_stock, 2),
                     "總殖利率(%)": round(total_yield, 2)
                 })
-            # 每一檔抓完稍微停 0.3 秒，避免被 Yahoo 視為惡意攻擊
             time.sleep(0.3)
-        except Exception as e:
+        except Exception:
             continue
             
-    status_text.empty() # 抓完後清除提示文字
+    status_text.empty()
     return pd.DataFrame(results)
 
-# 執行抓取
-with st.spinner('數據計算中，請稍候...'):
-    df = get_data_65()
+# 執行數據抓取
+df = get_data_65()
 
-# --- 顯示結果 ---
+# 設定門檻 (測試用 4.0，成功後改回 6.5)
+threshold = 4.0
+
+# --- 1. 網頁顯示邏輯 ---
 if not df.empty:
     st.write(f"✅ 數據更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # 門檻設定為 4
-    threshold = 4
-    
-    # 表格美化：高於 6.5% 的格子會變成粉紅色
-    def highlight_target(val):
-        return 'background-color: #FFCCCC' if val >= threshold else ''
-    
     st.dataframe(
-        df.style.map(highlight_target, subset=['總殖利率(%)']),
+        df.style.map(lambda x: 'background-color: #FFCCCC' if x >= threshold else '', subset=['總殖利率(%)']),
         use_container_width=True
     )
-    
-    # 找出達標股票
     target_stocks = df[df['總殖利率(%)'] >= threshold]
-    
     if not target_stocks.empty:
         st.success(f"🔥 發現 {len(target_stocks)} 檔標的總殖利率超過 {threshold}%！")
-    else:
-        st.info(f"目前沒有標的高於 {threshold}%。")
-
-    # --- GitHub Actions 自動發信 (背景執行) ---
-    if os.getenv("GITHUB_ACTIONS") == "true" and not target_stocks.empty:
-        user = os.getenv("MAIL_USER")
-        password = os.getenv("MAIL_PASSWORD")
-        to = os.getenv("MAIL_TO")
-        
-        if user and password:
-            content = f"📢 金融股達標通知：\n\n{target_stocks.to_string()}\n\n計算公式：(5年平均現金+5年平均配股)/目前股價"
-            msg = MIMEText(content)
-            msg['Subject'] = f'【殖利率監控】{len(target_stocks)} 檔金融股已達標！'
-            msg['From'] = user
-            msg['To'] = to
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                server.login(user, password)
-                server.send_message(msg)
 else:
-    st.error("連線超時或抓不到數據，請點擊網頁右上角選單選擇 'Clear cache' 後再試一次。")
+    st.error("暫時抓不到數據，請稍後再試。")
+
+# --- 2. GitHub Actions 自動發信邏輯 (獨立區塊，不縮排在上面的 if 裡面) ---
+if os.getenv("GITHUB_ACTIONS") == "true":
+    print("--- 偵測到環境為 GitHub Actions，準備執行發信檢查 ---")
+    if not df.empty:
+        targets = df[df['總殖利率(%)'] >= threshold]
+        if not targets.empty:
+            user = os.getenv("MAIL_USER")
+            password = os.getenv("MAIL_PASSWORD")
+            to = os.getenv("MAIL_TO")
+            
+            if user and password:
+                try:
+                    content = f"📢 金融股達標通知：\n\n{targets.to_string()}\n\n計算公式：(5年平均現金+5年平均配股)/目前股價"
+                    msg = MIMEText(content)
+                    msg['Subject'] = f'【殖利率監控】{len(targets)} 檔金融股已達標！'
+                    msg['From'] = user
+                    msg['To'] = to
+                    
+                    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                        server.login(user, password)
+                        server.send_message(msg)
+                    print("✅ 郵件發送成功！")
+                except Exception as e:
+                    print(f"❌ 郵件發送失敗: {e}")
+            else:
+                print("❌ 錯誤：未設定 MAIL_USER 或 MAIL_PASSWORD")
+        else:
+            print("ℹ️ 目前沒有股票達標，不發送信件。")
